@@ -20,9 +20,9 @@ import type {
 } from 'webpack';
 
 import type * as CSS from '@lynx-js/css-serializer';
+import { cssChunksToMap } from '@lynx-js/css-serializer';
 import { RuntimeGlobals } from '@lynx-js/webpack-runtime-globals';
 
-import { cssChunksToMap } from './css/cssChunksToMap.js';
 import { createLynxAsyncChunksRuntimeModule } from './LynxAsyncChunksRuntimeModule.js';
 
 export type OriginManifest = Record<string, {
@@ -64,7 +64,7 @@ const LynxTemplatePluginHooksMap = new WeakMap<Compilation, TemplateHooks>();
  *     compiler.hooks.compilation.tap("MyPlugin", (compilation) => {
  *       console.log("The compiler is starting a new compilation...");
  *
- *       LynxTemplatePlugin.getCompilationHooks(compilation).beforeEmit.tapAsync(
+ *       LynxTemplatePlugin.getLynxTemplatePluginHooks(compilation).beforeEmit.tapAsync(
  *         "MyPlugin", // <-- Set a meaningful name here for stacktraces
  *         (data, cb) => {
  *           // Manipulate the content
@@ -124,6 +124,7 @@ export interface TemplateHooks {
     outputName: string;
     mainThreadAssets: Asset[];
     cssChunks: Asset[];
+    entryNames: string[];
   }>;
 
   /**
@@ -670,12 +671,16 @@ class LynxTemplatePluginImpl {
 
     await Promise.all(
       Object.entries(asyncChunkGroups).map(
-        ([entryName, chunkGroups]): Promise<void> => {
-          const chunkNames =
-            // We use the chunk name(provided by `webpackChunkName`) as filename
+        ([_entryName, chunkGroups]): Promise<void> => {
+          const entryNames = // We use the chunk name(provided by `webpackChunkName`) as filename
             chunkGroups
-              .filter(cg => cg.name !== null && cg.name !== undefined)
-              .map(cg => hooks.asyncChunkName.call(cg.name!));
+              .filter(cg => cg.name !== null && cg.name !== undefined).map(cg =>
+                cg.name!
+              );
+
+          const chunkNames = entryNames.map(name =>
+            hooks.asyncChunkName.call(name)
+          );
 
           const filename = Array.from(new Set(chunkNames)).join('_');
 
@@ -695,13 +700,15 @@ class LynxTemplatePluginImpl {
 
           const asyncAssetsInfoByGroups = this.#getAssetsInformationByFilenames(
             compilation,
-            chunkGroups.flatMap(cg => cg.getFiles()),
+            chunkGroups.flatMap(cg => cg.getFiles()).filter(chunkFile =>
+              predicateNonHotModuleReplacementAsset(chunkFile, compilation)
+            ),
           );
 
           return this.#encodeByAssetsInformation(
             compilation,
             asyncAssetsInfoByGroups,
-            [entryName],
+            entryNames,
             filenameTemplate,
             path.join(intermediateRoot, 'async', filename),
             /** isAsync */ true,
@@ -742,7 +749,7 @@ class LynxTemplatePluginImpl {
     const isDev = process.env['NODE_ENV'] === 'development'
       || compiler.options.mode === 'development';
 
-    const css = cssChunksToMap(
+    const initialCSS = cssChunksToMap(
       assetsInfoByGroups.css
         .map(chunk => compilation.getAsset(chunk.name))
         .filter((v): v is Asset => !!v)
@@ -750,13 +757,31 @@ class LynxTemplatePluginImpl {
       cssPlugins,
       enableCSSSelector,
     );
+
+    let templateDebugUrl = '';
+    const debugInfoPath = path.posix.format({
+      dir: intermediate,
+      base: 'debug-info.json',
+    });
+    // TODO: Support publicPath function
+    if (
+      typeof compiler.options.output.publicPath === 'string'
+      && compiler.options.output.publicPath !== 'auto'
+      && compiler.options.output.publicPath !== '/'
+    ) {
+      templateDebugUrl = new URL(
+        debugInfoPath,
+        compiler.options.output.publicPath,
+      ).toString();
+    }
+
     const encodeRawData: EncodeRawData = {
       compilerOptions: {
         enableFiberArch: true,
         useLepusNG: true,
         enableReuseContext: true,
         bundleModuleMode: 'ReturnByFunction',
-        templateDebugUrl: '',
+        templateDebugUrl,
 
         debugInfoOutside,
         defaultDisplayLinear,
@@ -784,7 +809,7 @@ class LynxTemplatePluginImpl {
         },
       },
       css: {
-        ...css,
+        ...initialCSS,
         chunks: assetsInfoByGroups.css,
       },
       lepusCode: {
@@ -816,7 +841,7 @@ class LynxTemplatePluginImpl {
       entryNames,
     });
 
-    const { lepusCode } = encodeData;
+    const { lepusCode, css } = encodeData;
 
     const resolvedEncodeOptions: EncodeOptions = {
       ...encodeData,
@@ -836,23 +861,6 @@ class LynxTemplatePluginImpl {
         filename: lepusCode.filename,
       },
     };
-
-    const debugInfoPath = path.posix.format({
-      dir: intermediate,
-      base: 'debug-info.json',
-    });
-
-    // TODO: Support publicPath function
-    if (
-      typeof compiler.options.output.publicPath === 'string'
-      && compiler.options.output.publicPath !== 'auto'
-      && compiler.options.output.publicPath !== '/'
-    ) {
-      resolvedEncodeOptions.compilerOptions['templateDebugUrl'] = new URL(
-        debugInfoPath,
-        compiler.options.output.publicPath,
-      ).toString();
-    }
 
     const { RawSource } = compiler.webpack.sources;
 
@@ -900,6 +908,7 @@ class LynxTemplatePluginImpl {
         mainThreadAssets: [lepusCode.root, ...encodeData.lepusCode.chunks]
           .filter(i => i !== undefined),
         cssChunks: assetsInfoByGroups.css,
+        entryNames,
       });
 
       compilation.emitAsset(filename, new RawSource(template, false));
@@ -959,17 +968,9 @@ class LynxTemplatePluginImpl {
       /** entryPointUnfilteredFiles - also includes hot module update files */
       const entryPointUnfilteredFiles = compilation.entrypoints.get(entryName)!
         .getFiles();
-      return entryPointUnfilteredFiles.filter((chunkFile) => {
-        const asset = compilation.getAsset(chunkFile);
-
-        // Prevent hot-module files from being included:
-        const assetMetaInformation = asset?.info ?? {};
-
-        return !(
-          assetMetaInformation.hotModuleReplacement
-            ?? assetMetaInformation.development
-        );
-      });
+      return entryPointUnfilteredFiles.filter((chunkFile) =>
+        predicateNonHotModuleReplacementAsset(chunkFile, compilation)
+      );
     });
 
     return this.#getAssetsInformationByFilenames(compilation, filenames);
@@ -1049,4 +1050,19 @@ export function isDebug(): boolean {
 
 export function isRsdoctor(): boolean {
   return process.env['RSDOCTOR'] === 'true';
+}
+
+export function predicateNonHotModuleReplacementAsset(
+  chunkFile: string,
+  compilation: Compilation,
+): boolean {
+  const asset = compilation.getAsset(chunkFile);
+
+  // Prevent hot-module files from being included:
+  const assetMetaInformation = asset?.info ?? {};
+
+  return !(
+    assetMetaInformation.hotModuleReplacement
+      ?? assetMetaInformation.development
+  );
 }

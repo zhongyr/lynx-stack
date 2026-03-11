@@ -10,7 +10,8 @@
 
 import type { Worklet } from '@lynx-js/react/worklet-runtime/bindings';
 
-import { profileEnd, profileStart } from './debug/utils.js';
+import { profileEnd, profileStart } from './debug/profile.js';
+import { getSnapshotVNodeSource } from './debug/vnodeSource.js';
 import { processGestureBackground } from './gesture/processGestureBagkround.js';
 import type { GestureKind } from './gesture/types.js';
 import { diffArrayAction, diffArrayLepus } from './hydrate.js';
@@ -67,6 +68,17 @@ export class BackgroundSnapshotInstance {
   private __nextSibling: BackgroundSnapshotInstance | null = null;
   private __removed_from_tree?: boolean;
 
+  private get isDetached(): boolean {
+    let node: BackgroundSnapshotInstance | null = this;
+    while (node) {
+      if (node.__removed_from_tree) {
+        return true;
+      }
+      node = node.__parent;
+    }
+    return false;
+  }
+
   get parentNode(): BackgroundSnapshotInstance | null {
     return this.__parent;
   }
@@ -79,13 +91,15 @@ export class BackgroundSnapshotInstance {
   //   return !!this.__parent;
   // }
 
-  contains(child: BackgroundSnapshotInstance): boolean {
-    return child.parentNode === this;
-  }
+  // contains(child: BackgroundSnapshotInstance): boolean {
+  //   return child.parentNode === this;
+  // }
 
   // This will be called in `lazy`/`Suspense`.
   appendChild(child: BackgroundSnapshotInstance): void {
-    return this.insertBefore(child);
+    if (!this.isDetached) {
+      return this.insertBefore(child);
+    }
   }
 
   insertBefore(
@@ -225,7 +239,7 @@ export class BackgroundSnapshotInstance {
   }
 
   setAttribute(key: string | number, value: unknown): void {
-    if (__PROFILE__) {
+    if (typeof __PROFILE__ !== 'undefined' && __PROFILE__) {
       profileStart('ReactLynx::BSI::setAttribute');
     }
     if (key === 'values') {
@@ -273,7 +287,7 @@ export class BackgroundSnapshotInstance {
         });
       }
       this.__values = value as unknown[];
-      if (__PROFILE__) {
+      if (typeof __PROFILE__ !== 'undefined' && __PROFILE__) {
         profileEnd();
       }
       return;
@@ -292,7 +306,7 @@ export class BackgroundSnapshotInstance {
       key,
       value,
     );
-    if (__PROFILE__) {
+    if (typeof __PROFILE__ !== 'undefined' && __PROFILE__) {
       profileEnd();
     }
   }
@@ -378,149 +392,260 @@ export function hydrate(
   before: SerializedSnapshotInstance,
   after: BackgroundSnapshotInstance,
 ): SnapshotPatch {
-  initGlobalSnapshotPatch();
+  const shouldProfile = typeof __PROFILE__ !== 'undefined' && __PROFILE__;
+  if (shouldProfile) {
+    profileStart('ReactLynx::BSI::hydrate');
+  }
+  try {
+    initGlobalSnapshotPatch();
 
-  const helper = (
-    before: SerializedSnapshotInstance,
-    after: BackgroundSnapshotInstance,
-  ) => {
-    hydrationMap.set(after.__id, before.id);
-    backgroundSnapshotInstanceManager.updateId(after.__id, before.id);
-    after.__values?.forEach((value: unknown, index) => {
-      const old: unknown = before.values![index];
+    const helper = (
+      before: SerializedSnapshotInstance,
+      after: BackgroundSnapshotInstance,
+    ) => {
+      hydrationMap.set(after.__id, before.id);
+      backgroundSnapshotInstanceManager.updateId(after.__id, before.id);
+      after.__values?.forEach((value: unknown, index) => {
+        const old: unknown = before.values![index];
 
-      if (value) {
-        if (typeof value === 'object') {
-          if ('__spread' in value) {
-            // `value.__spread` my contain event ids using snapshot ids before hydration. Remove it.
-            delete value.__spread;
-            const __spread = transformSpread(after, index, value);
-            for (const key in __spread) {
-              const v = __spread[key];
-              if (v && typeof v === 'object') {
-                if ('_wkltId' in v) {
-                  onPostWorkletCtx(v as Worklet);
-                } else if ('__isGesture' in v) {
-                  processGestureBackground(v as GestureKind);
+        if (value) {
+          if (typeof value === 'object') {
+            if ('__spread' in value) {
+              // `value.__spread` my contain event ids using snapshot ids before hydration. Remove it.
+              delete value.__spread;
+              const __spread = transformSpread(after, index, value);
+              for (const key in __spread) {
+                const v = __spread[key];
+                if (v && typeof v === 'object') {
+                  if ('_wkltId' in v) {
+                    onPostWorkletCtx(v as Worklet);
+                  } else if ('__isGesture' in v) {
+                    processGestureBackground(v as GestureKind);
+                  }
                 }
               }
+              (after.__values![index]! as Record<string, unknown>)['__spread'] = __spread;
+              value = __spread;
+            } else if ('__ref' in value) {
+              // skip patch
+              value = old;
+            } else if ('_wkltId' in value) {
+              onPostWorkletCtx(value as Worklet);
+            } else if ('__isGesture' in value) {
+              processGestureBackground(value as GestureKind);
             }
-            (after.__values![index]! as Record<string, unknown>)['__spread'] = __spread;
-            value = __spread;
-          } else if ('__ref' in value) {
-            // skip patch
-            value = old;
-          } else if ('_wkltId' in value) {
-            onPostWorkletCtx(value as Worklet);
-          } else if ('__isGesture' in value) {
-            processGestureBackground(value as GestureKind);
-          }
-        } else if (typeof value === 'function') {
-          if ('__ref' in value) {
-            // skip patch
-            value = old;
-          } else {
-            value = `${after.__id}:${index}:`;
+          } else if (typeof value === 'function') {
+            if ('__ref' in value) {
+              // skip patch
+              value = old;
+            } else {
+              value = `${after.__id}:${index}:`;
+            }
           }
         }
-      }
 
-      if (!isDirectOrDeepEqual(value, old)) {
-        if (value === undefined && old === null) {
-          // This is a workaround for the case where we set an attribute to `undefined` in the main thread,
-          // but the old value becomes `null` during JSON serialization.
-          // In this case, we should not patch the value.
-        } else {
-          __globalSnapshotPatch!.push(
-            SnapshotOperation.SetAttribute,
-            after.__id,
-            index,
-            value,
-          );
-        }
-      }
-    });
-
-    if (after.__extraProps) {
-      for (const key in after.__extraProps) {
-        const value = after.__extraProps[key];
-        const old = before.extraProps?.[key];
         if (!isDirectOrDeepEqual(value, old)) {
-          __globalSnapshotPatch!.push(
-            SnapshotOperation.SetAttribute,
-            after.__id,
-            key,
-            value,
-          );
+          if (value === undefined && old === null) {
+            // This is a workaround for the case where we set an attribute to `undefined` in the main thread,
+            // but the old value becomes `null` during JSON serialization.
+            // In this case, we should not patch the value.
+          } else {
+            if (shouldProfile) {
+              profileStart('ReactLynx::hydrate::setAttribute', {
+                args: {
+                  id: String(after.__id),
+                  snapshotType: String(after.type),
+                  source: getSnapshotVNodeSource(after.__id) ?? '',
+                  dynamicPartIndex: String(index),
+                  valueType: value === null ? 'null' : typeof value,
+                },
+              });
+              try {
+                __globalSnapshotPatch!.push(
+                  SnapshotOperation.SetAttribute,
+                  after.__id,
+                  index,
+                  value,
+                );
+              } finally {
+                profileEnd();
+              }
+            } else {
+              __globalSnapshotPatch!.push(
+                SnapshotOperation.SetAttribute,
+                after.__id,
+                index,
+                value,
+              );
+            }
+          }
+        }
+      });
+
+      if (after.__extraProps) {
+        for (const key in after.__extraProps) {
+          const value = after.__extraProps[key];
+          const old = before.extraProps?.[key];
+          if (!isDirectOrDeepEqual(value, old)) {
+            if (shouldProfile) {
+              profileStart('ReactLynx::hydrate::setAttribute', {
+                args: {
+                  id: String(after.__id),
+                  snapshotType: String(after.type),
+                  source: getSnapshotVNodeSource(after.__id) ?? '',
+                  dynamicPartIndex: key,
+                  valueType: value === null ? 'null' : typeof value,
+                },
+              });
+              try {
+                __globalSnapshotPatch!.push(
+                  SnapshotOperation.SetAttribute,
+                  after.__id,
+                  key,
+                  value,
+                );
+              } finally {
+                profileEnd();
+              }
+            } else {
+              __globalSnapshotPatch!.push(
+                SnapshotOperation.SetAttribute,
+                after.__id,
+                key,
+                value,
+              );
+            }
+          }
         }
       }
-    }
 
-    const { slot } = after.__snapshot_def;
+      const { slot } = after.__snapshot_def;
 
-    const beforeChildNodes = before.children ?? [];
-    const afterChildNodes = after.childNodes;
+      const beforeChildNodes = before.children ?? [];
+      const afterChildNodes = after.childNodes;
 
-    if (!slot) {
-      return;
-    }
-
-    slot.forEach(([type], index) => {
-      switch (type) {
-        case DynamicPartType.Slot:
-        case DynamicPartType.MultiChildren: {
-          // TODO: the following null assertions are not 100% safe
-          const v1 = beforeChildNodes[index]!;
-          const v2 = afterChildNodes[index]!;
-          helper(v1, v2);
-          break;
-        }
-        case DynamicPartType.Children:
-        case DynamicPartType.ListChildren: {
-          const diffResult = diffArrayLepus(
-            beforeChildNodes,
-            afterChildNodes,
-            (a, b) => a.type === b.type,
-            (a, b) => {
-              helper(a, b);
-            },
-            // Should be `false` in hydrate as SerializedSnapshotInstance has no item-key
-            false,
-          );
-          diffArrayAction(
-            beforeChildNodes,
-            diffResult,
-            (node, target) => {
-              reconstructInstanceTree([node], before.id, target?.id);
-              return undefined as unknown as SerializedSnapshotInstance;
-            },
-            node => {
-              __globalSnapshotPatch!.push(
-                SnapshotOperation.RemoveChild,
-                before.id,
-                node.id,
-              );
-            },
-            (node, target) => {
-              // changedList.push([SnapshotOperation.RemoveChild, before.id, node.id]);
-              __globalSnapshotPatch!.push(
-                SnapshotOperation.InsertBefore,
-                before.id,
-                node.id,
-                target?.id,
-              );
-            },
-          );
-          break;
-        }
+      if (!slot) {
+        return;
       }
-    });
-  };
 
-  helper(before, after);
-  // Hydration should not trigger ref updates. They were incorrectly triggered when using `setAttribute` to add values to the patch list.
-  clearQueuedRefs();
-  return takeGlobalSnapshotPatch()!;
+      slot.forEach(([type], index) => {
+        switch (type) {
+          case DynamicPartType.Slot:
+          case DynamicPartType.MultiChildren: {
+            // TODO: the following null assertions are not 100% safe
+            const v1 = beforeChildNodes[index]!;
+            const v2 = afterChildNodes[index]!;
+            helper(v1, v2);
+            break;
+          }
+          case DynamicPartType.Children:
+          case DynamicPartType.ListChildren: {
+            const diffResult = diffArrayLepus(
+              beforeChildNodes,
+              afterChildNodes,
+              (a, b) => a.type === b.type,
+              (a, b) => {
+                helper(a, b);
+              },
+              // Should be `false` in hydrate as SerializedSnapshotInstance has no item-key
+              false,
+            );
+            diffArrayAction(
+              beforeChildNodes,
+              diffResult,
+              (node, target) => {
+                if (shouldProfile) {
+                  profileStart('ReactLynx::BSI::reconstructInstanceTree', {
+                    args: {
+                      id: String(node.__id),
+                      snapshotType: String(node.type),
+                      source: getSnapshotVNodeSource(node.__id) ?? '',
+                    },
+                  });
+                }
+                try {
+                  reconstructInstanceTree([node], before.id, target?.id);
+                } finally {
+                  if (shouldProfile) {
+                    profileEnd();
+                  }
+                }
+                return undefined as unknown as SerializedSnapshotInstance;
+              },
+              node => {
+                if (shouldProfile) {
+                  profileStart('ReactLynx::hydrate::removeChild', {
+                    args: {
+                      id: String(node.id),
+                      snapshotType: String(node.type),
+                      source: getSnapshotVNodeSource(node.id) ?? '',
+                      parentId: String(before.id),
+                    },
+                  });
+                  try {
+                    __globalSnapshotPatch!.push(
+                      SnapshotOperation.RemoveChild,
+                      before.id,
+                      node.id,
+                    );
+                  } finally {
+                    profileEnd();
+                  }
+                } else {
+                  __globalSnapshotPatch!.push(
+                    SnapshotOperation.RemoveChild,
+                    before.id,
+                    node.id,
+                  );
+                }
+              },
+              (node, target) => {
+                // changedList.push([SnapshotOperation.RemoveChild, before.id, node.id]);
+                if (shouldProfile) {
+                  profileStart('ReactLynx::hydrate::insertBefore', {
+                    args: {
+                      id: String(node.id),
+                      snapshotType: String(node.type),
+                      source: getSnapshotVNodeSource(node.id) ?? '',
+                      parentId: String(before.id),
+                      targetId: String(target?.id ?? ''),
+                    },
+                  });
+                  try {
+                    __globalSnapshotPatch!.push(
+                      SnapshotOperation.InsertBefore,
+                      before.id,
+                      node.id,
+                      target?.id,
+                    );
+                  } finally {
+                    profileEnd();
+                  }
+                } else {
+                  __globalSnapshotPatch!.push(
+                    SnapshotOperation.InsertBefore,
+                    before.id,
+                    node.id,
+                    target?.id,
+                  );
+                }
+              },
+            );
+            break;
+          }
+        }
+      });
+    };
+
+    helper(before, after);
+    // Hydration should not trigger ref updates. They were incorrectly triggered when using `setAttribute` to add values to the patch list.
+    clearQueuedRefs();
+    return takeGlobalSnapshotPatch()!;
+  } finally {
+    if (shouldProfile) {
+      profileEnd();
+    }
+  }
 }
 
 function reconstructInstanceTree(afters: BackgroundSnapshotInstance[], parentId: number, targetId?: number): void {

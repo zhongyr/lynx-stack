@@ -3,6 +3,9 @@
 // LICENSE file in the root directory of this source tree.
 import type { Asset, Compilation, Compiler } from 'webpack'
 
+import { cssChunksToMap } from '@lynx-js/css-serializer'
+import type { LynxStyleNode } from '@lynx-js/css-serializer'
+
 /**
  * The options for {@link ExternalBundleWebpackPlugin}.
  *
@@ -34,11 +37,11 @@ export interface ExternalBundleWebpackPluginOptions {
    */
   encode: (opts: unknown) => Promise<{ buffer: Buffer }>
   /**
-   * The target SDK version of the external bundle.
+   * The engine version of the external bundle.
    *
-   * @defaultValue '3.4'
+   * @defaultValue '3.5'
    */
-  targetSdkVersion?: string | undefined
+  engineVersion?: string | undefined
 }
 
 const isDebug = (): boolean => {
@@ -112,18 +115,49 @@ export class ExternalBundleWebpackPlugin {
 
   async #encode(assets: Readonly<Asset>[]) {
     const customSections = assets
-      .filter(({ name }) => name.endsWith('.js'))
-      .reduce<Record<string, { content: string }>>((prev, cur) => ({
-        ...prev,
-        [cur.name.replace(/\.js$/, '')]: {
-          content: cur.source.source().toString(),
+      .reduce<
+        Record<string, {
+          content: string | {
+            ruleList: LynxStyleNode[]
+          }
+        }>
+      >(
+        (prev, cur) => {
+          switch (cur.info['assetType']) {
+            case 'javascript':
+              return ({
+                ...prev,
+                [cur.name.replace(/\.js$/, '')]: {
+                  content: cur.source.source().toString(),
+                },
+              })
+            case 'extract-css':
+              return ({
+                ...prev,
+                [`${cur.name.replace(/\.css$/, '')}:CSS`]: {
+                  'encoding': 'CSS',
+                  content: {
+                    ruleList: cssChunksToMap(
+                      [cur.source.source().toString()],
+                      [],
+                      true,
+                    ).cssMap[0] ?? [],
+                  },
+                },
+              })
+            default:
+              return prev
+          }
         },
-      }), {})
+        {},
+      )
 
     const compilerOptions: Record<string, unknown> = {
       enableFiberArch: true,
-      // lynx.fetchBundle requires targetSdkVersion >= 3.4
-      targetSdkVersion: this.options.targetSdkVersion ?? '3.4',
+      // `lynx.fetchBundle` and `lynx.loadScript` require engineVersion >= 3.5
+      targetSdkVersion: this.options.engineVersion ?? '3.5',
+      enableCSSInvalidation: true,
+      enableCSSSelector: true,
     }
 
     const encodeOptions = {

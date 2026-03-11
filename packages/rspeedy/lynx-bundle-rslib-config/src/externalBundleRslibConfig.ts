@@ -17,22 +17,12 @@ import { MainThreadRuntimeWrapperWebpackPlugin } from './webpack/MainThreadRunti
  */
 export interface EncodeOptions {
   /**
-   * The target SDK version of the external bundle.
+   * The engine version of the external bundle.
    *
-   * @defaultValue '3.4'
+   * @defaultValue '3.5'
    */
-  targetSdkVersion?: string
+  engineVersion?: string
 }
-
-/**
- * The Layer name of background and main-thread.
- *
- * @public
- */
-export const LAYERS = {
-  BACKGROUND: 'background',
-  MAIN_THREAD: 'main-thread',
-} as const
 
 /**
  * The default lib config{@link LibConfig} for external bundle.
@@ -54,7 +44,7 @@ export const defaultExternalBundleLibConfig: LibConfig = {
     },
   },
   output: {
-    minify: {
+    minify: process.env['NODE_ENV'] === 'development' ? false : {
       jsOptions: {
         minimizerOptions: {
           compress: {
@@ -69,10 +59,51 @@ export const defaultExternalBundleLibConfig: LibConfig = {
         },
       },
     },
+    target: 'web',
   },
   source: {
     include: [/node_modules/],
   },
+}
+
+export type Externals = Record<string, string | string[]>
+
+export type LibOutputConfig = Required<LibConfig>['output']
+
+export interface OutputConfig extends LibOutputConfig {
+  externals?: Externals
+  /**
+   * This option indicates what global object will be used to mount the library.
+   *
+   * In Lynx, the library will be mounted to `lynx[Symbol.for("__LYNX_EXTERNAL_GLOBAL__")]` by default.
+   *
+   * If you have enabled share js context and want to reuse the library by mounting to the global object, you can set this option to `'globalThis'`.
+   *
+   * @default 'lynx'
+   */
+  globalObject?: 'lynx' | 'globalThis'
+}
+
+export interface ExternalBundleLibConfig extends LibConfig {
+  output?: OutputConfig
+}
+
+function transformExternals(
+  externals?: Externals,
+  globalObject?: string,
+): Required<LibOutputConfig>['externals'] {
+  if (!externals) return {}
+
+  return function({ request }, callback) {
+    if (!request) return callback()
+    const libraryName = externals[request]
+    if (!libraryName) return callback()
+
+    callback(undefined, [
+      `${globalObject ?? 'lynx'}[Symbol.for("__LYNX_EXTERNAL_GLOBAL__")]`,
+      ...(Array.isArray(libraryName) ? libraryName : [libraryName]),
+    ], 'var')
+  }
 }
 
 /**
@@ -86,7 +117,7 @@ export const defaultExternalBundleLibConfig: LibConfig = {
  *
  * ```js
  * // rslib.config.js
- * import { defineExternalBundleRslibConfig, LAYERS } from '@lynx-js/lynx-bundle-rslib-config'
+ * import { defineExternalBundleRslibConfig } from '@lynx-js/lynx-bundle-rslib-config'
  *
  * export default defineExternalBundleRslibConfig({
  *   id: 'utils-lib',
@@ -94,7 +125,7 @@ export const defaultExternalBundleLibConfig: LibConfig = {
  *     entry: {
  *       utils: {
  *         import: './src/utils.ts',
- *         layer: LAYERS.BACKGROUND,
+ *         layer: 'background',
  *       }
  *     }
  *   }
@@ -109,7 +140,7 @@ export const defaultExternalBundleLibConfig: LibConfig = {
  *
  * ```js
  * // rslib.config.js
- * import { defineExternalBundleRslibConfig, LAYERS } from '@lynx-js/lynx-bundle-rslib-config'
+ * import { defineExternalBundleRslibConfig } from '@lynx-js/lynx-bundle-rslib-config'
  *
  * export default defineExternalBundleRslibConfig({
  *   id: 'utils-lib',
@@ -117,7 +148,7 @@ export const defaultExternalBundleLibConfig: LibConfig = {
  *     entry: {
  *       utils: {
  *         import: './src/utils.ts',
- *         layer: LAYERS.MAIN_THREAD,
+ *         layer: 'main-thread',
  *       }
  *     }
  *   }
@@ -146,7 +177,7 @@ export const defaultExternalBundleLibConfig: LibConfig = {
  * Then you can use `lynx.loadScript('utils', { bundleName: 'utils-lib-bundle-url' })` in background thread and `lynx.loadScript('utils__main-thread', { bundleName: 'utils-lib-bundle-url' })` in main-thread.
  */
 export function defineExternalBundleRslibConfig(
-  userLibConfig: LibConfig,
+  userLibConfig: ExternalBundleLibConfig,
   encodeOptions: EncodeOptions = {},
 ): RslibConfig {
   return {
@@ -154,19 +185,46 @@ export function defineExternalBundleRslibConfig(
       // eslint-disable-next-line import/namespace
       rsbuild.mergeRsbuildConfig<LibConfig>(
         defaultExternalBundleLibConfig,
-        userLibConfig,
+        {
+          ...userLibConfig,
+          output: {
+            ...userLibConfig.output,
+            externals: transformExternals(
+              userLibConfig.output?.externals,
+              userLibConfig.output?.globalObject,
+            ),
+          },
+        },
       ),
     ],
     plugins: [
       externalBundleEntryRsbuildPlugin(),
-      externalBundleRsbuildPlugin(encodeOptions.targetSdkVersion),
+      externalBundleRsbuildPlugin(encodeOptions.engineVersion),
     ],
   }
 }
 
+interface ExposedLayers {
+  readonly BACKGROUND: string
+  readonly MAIN_THREAD: string
+}
+
 const externalBundleEntryRsbuildPlugin = (): rsbuild.RsbuildPlugin => ({
   name: 'lynx:external-bundle-entry',
+  // ensure dsl plugin has exposed LAYERS
+  enforce: 'post',
   setup(api) {
+    // Get layer names from react-rsbuild-plugin
+    const LAYERS = api.useExposed<ExposedLayers>(
+      Symbol.for('LAYERS'),
+    )
+
+    if (!LAYERS) {
+      throw new Error(
+        'external-bundle-rsbuild-plugin requires exposed `LAYERS`.',
+      )
+    }
+
     api.modifyBundlerChain((chain) => {
       // copy entries
       const entries = chain.entryPoints.entries() ?? {}
@@ -251,7 +309,7 @@ const externalBundleEntryRsbuildPlugin = (): rsbuild.RsbuildPlugin => ({
 })
 
 const externalBundleRsbuildPlugin = (
-  targetSdkVersion: string | undefined,
+  engineVersion: string | undefined,
 ): rsbuild.RsbuildPlugin => ({
   name: 'lynx:gen-external-bundle',
   async setup(api) {
@@ -264,10 +322,10 @@ const externalBundleRsbuildPlugin = (
         .use(
           ExternalBundleWebpackPlugin,
           [
-            { 
+            {
               bundleFileName: `${libName}.lynx.bundle`,
               encode: getEncodeMode(),
-              targetSdkVersion,
+              engineVersion,
             },
           ],
         )

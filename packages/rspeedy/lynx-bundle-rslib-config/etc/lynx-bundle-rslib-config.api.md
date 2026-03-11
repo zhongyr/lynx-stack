@@ -14,12 +14,14 @@ import type { RslibConfig } from '@rslib/core';
 // @public
 export const defaultExternalBundleLibConfig: LibConfig;
 
+// Warning: (ae-forgotten-export) The symbol "ExternalBundleLibConfig" needs to be exported by the entry point index.d.ts
+//
 // @public
-export function defineExternalBundleRslibConfig(userLibConfig: LibConfig, encodeOptions?: EncodeOptions): RslibConfig;
+export function defineExternalBundleRslibConfig(userLibConfig: ExternalBundleLibConfig, encodeOptions?: EncodeOptions): RslibConfig;
 
 // @public
 export interface EncodeOptions {
-    targetSdkVersion?: string;
+    engineVersion?: string;
 }
 
 // @public
@@ -35,14 +37,8 @@ export interface ExternalBundleWebpackPluginOptions {
     encode: (opts: unknown) => Promise<{
         buffer: Buffer;
     }>;
-    targetSdkVersion?: string | undefined;
+    engineVersion?: string | undefined;
 }
-
-// @public
-export const LAYERS: {
-    readonly BACKGROUND: "background";
-    readonly MAIN_THREAD: "main-thread";
-};
 
 // @public
 export class MainThreadRuntimeWrapperWebpackPlugin {

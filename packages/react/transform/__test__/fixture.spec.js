@@ -379,8 +379,8 @@ Component, View
         ]
       `);
       expect(result.code).toMatchInlineSnapshot(`
-        "/*#__PURE__*/ import { jsx as _jsx } from "@lynx-js/react/jsx-runtime";
-        _jsx(Comp, {
+        "import { jsx as _jsx } from "@lynx-js/react/jsx-runtime";
+        /*#__PURE__*/ _jsx(Comp, {
             ...s
         });
         "
@@ -397,7 +397,7 @@ Component, View
         }),
       ).toMatchInlineSnapshot(`[]`);
       expect(result.code).toMatchInlineSnapshot(`
-        "/*#__PURE__*/ import { jsx as _jsx } from "@lynx-js/react/jsx-runtime";
+        "import { jsx as _jsx } from "@lynx-js/react/jsx-runtime";
         import * as ReactLynx from "@lynx-js/react";
         import * as ReactLynx1 from "@lynx-js/react/internal";
         const __snapshot_da39a_89b7f_1 = "__snapshot_da39a_89b7f_1";
@@ -533,6 +533,21 @@ Component, View
         ",
         ]
       `);
+    }
+
+    {
+      cfg.compat.disableDeprecatedWarning = true;
+      const result = await transformReactLynx(
+        `this.createSelectorQuery();
+         this.getElementById();`,
+        cfg,
+      );
+      expect(
+        await formatMessages(result.warnings, {
+          kind: 'warning',
+          color: false,
+        }),
+      ).toMatchInlineSnapshot(`[]`);
     }
   });
 });
@@ -913,11 +928,61 @@ export default class App extends Component {
 });
 
 describe('dynamic import', () => {
+  it('lazy import', async () => {
+    const result = await transformReactLynx(`await import("https://www/a.js", { with: { type: "component" } });`, {
+      pluginName: '',
+      filename: '',
+      sourcemap: false,
+      parserConfig: {
+        tsx: true,
+      },
+      cssScope: false,
+      jsx: false,
+      directiveDCE: false,
+      defineDCE: false,
+      shake: false,
+      compat: false,
+      worklet: false,
+      refresh: false,
+    });
+    expect(result.code).toMatchInlineSnapshot(`
+      "import "@lynx-js/react/experimental/lazy/import";
+      import { __dynamicImport } from "@lynx-js/react/internal";
+      await __dynamicImport("https://www/a.js", {
+          with: {
+              type: "component"
+          }
+      });
+      "
+    `);
+  });
+  it('inline import', async () => {
+    const result = await transformReactLynx(`await import(/*webpackChunkName: "./index.js-test"*/"./index.js");`, {
+      pluginName: '',
+      filename: '',
+      sourcemap: false,
+      parserConfig: {
+        tsx: true,
+      },
+      cssScope: false,
+      jsx: false,
+      directiveDCE: false,
+      defineDCE: false,
+      shake: false,
+      compat: false,
+      worklet: false,
+      refresh: false,
+    });
+    expect(result.code).toMatchInlineSnapshot(`
+      "import 'data:text/javascript;charset=utf-8,import { loadLazyBundle } from "@lynx-js/react/internal";lynx.loadLazyBundle = loadLazyBundle;';
+      await import(/*webpackChunkName: "./index.js-test"*/ /*webpackChunkName: "./index.js-"*/ "./index.js");
+      "
+    `);
+  });
   it('badcase', async () => {
     const result = await transformReactLynx(
       `\
 (async function () {
-  await import();
   await import(0);
   await import(0, 0);
   await import("./index.js", { with: { typo: "component" } });
@@ -947,7 +1012,6 @@ describe('dynamic import', () => {
       "import "@lynx-js/react/experimental/lazy/import";
       import { __dynamicImport } from "@lynx-js/react/internal";
       (async function() {
-          await import();
           await import(0);
           await import(0, 0);
           await import("./index.js", {
@@ -974,31 +1038,24 @@ describe('dynamic import', () => {
     expect(await formatMessages(result.errors, { kind: 'error', color: false }))
       .toMatchInlineSnapshot(`
         [
-          "${errorIcon} [ERROR] \`import()\` with no argument is not allowed
-
-            :2:8:
-              2 │   await import();
-                ╵         ~~~~~~~~
-
-        ",
           "${errorIcon} [ERROR] \`import(...)\` call with non-string literal module id is not allowed
 
-            :3:8:
-              3 │   await import(0);
+            :2:8:
+              2 │   await import(0);
                 ╵         ~~~~~~~~~
 
         ",
           "${errorIcon} [ERROR] \`import(...)\` call with non-string literal module id is not allowed
 
-            :4:8:
-              4 │   await import(0, 0);
+            :3:8:
+              3 │   await import(0, 0);
                 ╵         ~~~~~~~~~~~~
 
         ",
           "${errorIcon} [ERROR] \`import("...", ...)\` with invalid options is not allowed
 
-            :5:8:
-              5 │   await import("./index.js", { with: { typo: "component" } });
+            :4:8:
+              4 │   await import("./index.js", { with: { typo: "component" } });
                 ╵         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
         ",
@@ -1386,6 +1443,123 @@ class X extends Component {
 });
 
 describe('worklet', () => {
+  it('should error on unsupported runtime import attribute', async () => {
+    const result = await transformReactLynx(
+      `\
+import { foo } from "./shared.js" with { runtime: "invalid" };
+export function bar() {
+  "main thread";
+  foo();
+}
+`,
+      {
+        pluginName: '',
+        filename: '',
+        sourcemap: false,
+        cssScope: false,
+        jsx: false,
+        directiveDCE: true,
+        defineDCE: {
+          define: {
+            __LEPUS__: 'true',
+            __JS__: 'false',
+          },
+        },
+        shake: false,
+        compat: true,
+        refresh: false,
+        worklet: {
+          target: 'LEPUS',
+          filename: '',
+          runtimePkg: '@lynx-js/react',
+        },
+      },
+    );
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].text).toBe(
+      'Invalid runtime value. Only \'shared\' is supported.',
+    );
+  });
+
+  it('should error on non-string runtime import attribute', async () => {
+    const result = await transformReactLynx(
+      `\
+import { foo } from "./shared.js" with { runtime: 123 };
+export function bar() {
+  "main thread";
+  foo();
+}
+`,
+      {
+        pluginName: '',
+        filename: '',
+        sourcemap: false,
+        cssScope: false,
+        jsx: false,
+        directiveDCE: true,
+        defineDCE: {
+          define: {
+            __LEPUS__: 'true',
+            __JS__: 'false',
+          },
+        },
+        shake: false,
+        compat: true,
+        refresh: false,
+        worklet: {
+          target: 'LEPUS',
+          filename: '',
+          runtimePkg: '@lynx-js/react',
+        },
+      },
+    );
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].text).toBe(
+      'Invalid runtime value. Only \'shared\' is supported.',
+    );
+  });
+
+  it('should error on non-string \'runtime\' key runtime import attribute', async () => {
+    const result = await transformReactLynx(
+      `\
+import { foo } from "./shared.js" with { 'runtime': 123 };
+export function bar() {
+  "main thread";
+  foo();
+}
+`,
+      {
+        pluginName: '',
+        filename: '',
+        sourcemap: false,
+        cssScope: false,
+        jsx: false,
+        directiveDCE: true,
+        defineDCE: {
+          define: {
+            __LEPUS__: 'true',
+            __JS__: 'false',
+          },
+        },
+        shake: false,
+        compat: true,
+        refresh: false,
+        worklet: {
+          target: 'LEPUS',
+          filename: '',
+          runtimePkg: '@lynx-js/react',
+        },
+      },
+    );
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].text).toBe(
+      'Invalid runtime value. Only \'shared\' is supported.',
+    );
+  });
+
   for (const target of ['LEPUS', 'JS', 'MIXED']) {
     it('member expression', async () => {
       const { code } = await transformReactLynx(
@@ -1433,7 +1607,8 @@ describe('worklet', () => {
               },
               _wkltId: "da39:75a1b:1"
           };
-          loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry) && registerWorkletInternal("main-thread", "da39:75a1b:1", function(event) {
+          const __workletRuntimeLoaded = loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry);
+          __workletRuntimeLoaded && registerWorkletInternal("main-thread", "da39:75a1b:1", function(event) {
               const getCurrentDelta = lynxWorkletImpl._workletMap["da39:75a1b:1"].bind(this);
               let { foo } = this["_c"];
               "main thread";
@@ -1469,7 +1644,8 @@ describe('worklet', () => {
               },
               _wkltId: "da39:75a1b:1"
           };
-          loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry) && registerWorkletInternal("main-thread", "da39:75a1b:1", function(event) {
+          const __workletRuntimeLoaded = loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry);
+          __workletRuntimeLoaded && registerWorkletInternal("main-thread", "da39:75a1b:1", function(event) {
               const getCurrentDelta = lynxWorkletImpl._workletMap["da39:75a1b:1"].bind(this);
               let { foo } = this["_c"];
               "main thread";
@@ -1534,7 +1710,8 @@ export function foo(event) {
           },
           _wkltId: "da39:64631:1"
       };
-      loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry) && registerWorkletInternal("main-thread", "da39:64631:1", function(event) {
+      const __workletRuntimeLoaded = loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry);
+      __workletRuntimeLoaded && registerWorkletInternal("main-thread", "da39:64631:1", function(event) {
           const foo = lynxWorkletImpl._workletMap["da39:64631:1"].bind(this);
           let { bar, qux } = this["_c"];
           "main thread";
@@ -1594,12 +1771,13 @@ console.log(bar)
           _wkltId: "da39:80ef4:2"
       };
       console.log(bar);
-      loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry) && registerWorkletInternal("main-thread", "da39:80ef4:1", function() {
+      const __workletRuntimeLoaded = loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry);
+      __workletRuntimeLoaded && registerWorkletInternal("main-thread", "da39:80ef4:1", function() {
           const foo = lynxWorkletImpl._workletMap["da39:80ef4:1"].bind(this);
           "main thread";
           return null;
       });
-      loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry) && registerWorkletInternal("main-thread", "da39:80ef4:2", function() {
+      __workletRuntimeLoaded && registerWorkletInternal("main-thread", "da39:80ef4:2", function() {
           const bar = lynxWorkletImpl._workletMap["da39:80ef4:2"].bind(this);
           let { foo } = this["_c"];
           "main thread";
@@ -1647,7 +1825,8 @@ function getCurrentDelta(event) {
     expect(code).toMatchInlineSnapshot(`
       "import { loadWorkletRuntime as __loadWorkletRuntime } from "@lynx-js/react";
       var loadWorkletRuntime = __loadWorkletRuntime;
-      loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry) && registerWorkletInternal("main-thread", "da39:059d0:1", function(event) {
+      const __workletRuntimeLoaded = loadWorkletRuntime(typeof globDynamicComponentEntry === 'undefined' ? undefined : globDynamicComponentEntry);
+      __workletRuntimeLoaded && registerWorkletInternal("main-thread", "da39:059d0:1", function(event) {
           lynxWorkletImpl._workletMap["da39:059d0:1"].bind(this);
           let { foo, a, b } = this["_c"];
           "main thread";

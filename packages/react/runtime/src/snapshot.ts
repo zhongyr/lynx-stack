@@ -17,6 +17,7 @@
 import type { Worklet, WorkletRefImpl } from '@lynx-js/react/worklet-runtime/bindings';
 
 import type { BackgroundSnapshotInstance } from './backgroundSnapshot.js';
+import { clearSnapshotVNodeSource, moveSnapshotVNodeSource } from './debug/vnodeSource.js';
 import { SnapshotOperation, __globalSnapshotPatch } from './lifecycle/patch/snapshotPatch.js';
 import { ListUpdateInfoRecording } from './listUpdateInfo.js';
 import { __pendingListUpdates } from './pendingListUpdates.js';
@@ -132,6 +133,9 @@ export const snapshotInstanceManager: {
   clear() {
     // not resetting `nextId` to prevent id collision
     this.values.clear();
+    if (__DEV__) {
+      clearSnapshotVNodeSource();
+    }
   },
 };
 
@@ -140,9 +144,13 @@ export let snapshotCreatorMap: Record<string, (uniqId: string) => string> = {};
 if (__DEV__ && __JS__) {
   snapshotCreatorMap = new Proxy(snapshotCreatorMap, {
     set(target, prop: string, value: (uniqId: string) => string) {
-      // `__globalSnapshotPatch` does not exist before hydration,
-      // so the snapshot of the first screen will not be sent to the main thread.
-      if (__globalSnapshotPatch) {
+      if (
+        // `__globalSnapshotPatch` does not exist before hydration,
+        // so the snapshot of the first screen will not be sent to the main thread.
+        __globalSnapshotPatch
+        // `prop` will be `https://example.com/main.lynx.bundle:__snapshot_835da_eff1e_1` when loading a standalone lazy bundle after hydration.
+        && !prop.includes(':')
+      ) {
         __globalSnapshotPatch.push(
           SnapshotOperation.DEV_ONLY_AddSnapshot,
           prop,
@@ -169,6 +177,9 @@ export const backgroundSnapshotInstanceManager: {
   clear() {
     // not resetting `nextId` to prevent id collision
     this.values.clear();
+    if (__DEV__) {
+      clearSnapshotVNodeSource();
+    }
   },
   updateId(id: number, newId: number) {
     const values = this.values;
@@ -187,6 +198,9 @@ export const backgroundSnapshotInstanceManager: {
     values.delete(id);
     values.set(newId, si);
     si.__id = newId;
+    if (__DEV__) {
+      moveSnapshotVNodeSource(id, newId);
+    }
   },
   getValueBySign(str: string): unknown {
     const res = str?.split(':');
@@ -231,6 +245,19 @@ export function createSnapshot(
 ): string {
   if (!isLazySnapshotSupported) {
     uniqID = entryUniqID(uniqID, entryName);
+  }
+  // For Lazy Bundle, their entryName is not DEFAULT_ENTRY_NAME.
+  // We need to set the entryName correctly for HMR
+  if (
+    __DEV__ && __JS__ && __globalSnapshotPatch && entryName && entryName !== DEFAULT_ENTRY_NAME
+    // `uniqID` will be `https://example.com/main.lynx.bundle:__snapshot_835da_eff1e_1` when loading a standalone lazy bundle after hydration.
+    && !uniqID.includes(':')
+  ) {
+    __globalSnapshotPatch.push(
+      SnapshotOperation.DEV_ONLY_SetSnapshotEntryName,
+      uniqID,
+      entryName,
+    );
   }
 
   const s: Snapshot = { create, update, slot, cssId, entryName, refAndSpreadIndexes };
@@ -291,7 +318,12 @@ export class SnapshotInstance {
       if (snapshotCreatorMap[type]) {
         snapshotCreatorMap[type](type);
       } else {
-        throw new Error('Snapshot not found: ' + type);
+        let message = 'Snapshot not found: ' + type;
+        if (__DEV__) {
+          message +=
+            '. You can set environment variable `REACT_ALOG=true` and restart your dev server for troubleshooting.';
+        }
+        throw new Error(message);
       }
     }
     this.__snapshot_def = snapshotManager.values.get(type)!;
@@ -607,12 +639,12 @@ export class SnapshotInstance {
       __RemoveElement(this.__elements[elementIndex]!, child.__element_root!);
     }
 
-    if (child.__snapshot_def.isListHolder) {
-      snapshotDestroyList(child);
-    }
-
     this.__removeChild(child);
     traverseSnapshotInstance(child, v => {
+      if (v.__snapshot_def.isListHolder) {
+        snapshotDestroyList(v);
+      }
+
       v.__parent = null;
       v.__previousSibling = null;
       v.__nextSibling = null;
