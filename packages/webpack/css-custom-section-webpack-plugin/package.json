@@ -1,0 +1,59 @@
+{
+  "name": "@zhongyr/lynx-css-custom-section-webpack-plugin",
+  "version": "0.1.0",
+  "description": "Serialize a CSS file into a Lynx TASM custom section during an Rspack build.",
+  "keywords": [
+    "Rspack",
+    "Lynx",
+    "CSS",
+    "TASM"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhongyr/lynx-stack.git",
+    "directory": "packages/webpack/css-custom-section-webpack-plugin"
+  },
+  "license": "Apache-2.0",
+  "author": {
+    "name": "zhongyr"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./lib/index.d.ts",
+  "files": [
+    "lib",
+    "!lib/**/*.js.map",
+    "CHANGELOG.md",
+    "README.md"
+  ],
+  "scripts": {
+    "api-extractor": "api-extractor run --verbose",
+    "test": "rstest"
+  },
+  "dependencies": {
+    "@lynx-js/css-serializer": "workspace:^"
+  },
+  "devDependencies": {
+    "@lynx-js/template-webpack-plugin": "workspace:*",
+    "@lynx-js/test-tools": "workspace:*",
+    "@rspack/core": "catalog:rspack",
+    "@rstest/core": "catalog:rstest"
+  },
+  "peerDependencies": {
+    "@lynx-js/template-webpack-plugin": "^0.14.1",
+    "@rspack/core": "^2.1.5"
+  },
+  "engines": {
+    "node": "^18.14 || >=19.4"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
