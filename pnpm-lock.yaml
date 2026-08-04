@@ -2332,6 +2332,25 @@ importers:
         specifier: ^7.1.4
         version: 7.1.4(@rspack/core@2.1.5(@swc/helpers@0.5.23))(webpack@5.105.2(@swc/core@1.15.30(@swc/helpers@0.5.23))(cssnano@7.1.2(postcss@8.5.21))(csso@5.0.5)(esbuild@0.27.3)(lightningcss@1.33.0)(postcss@8.5.21))
 
+  packages/webpack/css-custom-section-webpack-plugin:
+    dependencies:
+      '@lynx-js/css-serializer':
+        specifier: workspace:^
+        version: link:../../tools/css-serializer
+    devDependencies:
+      '@lynx-js/template-webpack-plugin':
+        specifier: workspace:*
+        version: link:../template-webpack-plugin
+      '@lynx-js/test-tools':
+        specifier: workspace:*
+        version: link:../test-tools
+      '@rspack/core':
+        specifier: 2.1.5
+        version: 2.1.5(@swc/helpers@0.5.23)
+      '@rstest/core':
+        specifier: catalog:rstest
+        version: 0.11.3(core-js@3.49.0)(jsdom@27.4.0(supports-color@10.2.2))
+
   packages/webpack/css-extract-webpack-plugin:
     devDependencies:
       '@lynx-js/css-serializer':
